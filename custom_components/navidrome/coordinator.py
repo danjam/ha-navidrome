@@ -104,11 +104,12 @@ class NavidromeCoordinator(DataUpdateCoordinator):
                     _LOGGER.debug("SSE re-authenticated after token expiry")
                     delay = SSE_INITIAL_RECONNECT_DELAY
                     first_failure = True
-                    continue
                 except NavidromeAuthError:
                     _LOGGER.warning("SSE credentials invalid, starting reauth")
                     self.config_entry.async_start_reauth(self.hass)
                     return
+                except NavidromeError as err:
+                    _LOGGER.debug("SSE re-auth failed (server unavailable): %s", err)
             except Exception as err:
                 if first_failure:
                     _LOGGER.warning("SSE connection lost: %s", err)
