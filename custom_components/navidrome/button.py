@@ -1,6 +1,9 @@
 from homeassistant.components.button import ButtonEntity
+from homeassistant.exceptions import HomeAssistantError
+from homeassistant.helpers.device_registry import DeviceInfo
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
+from .api import NavidromeError
 from .const import DOMAIN
 
 
@@ -19,20 +22,20 @@ class NavidromeStartScanButton(CoordinatorEntity, ButtonEntity):
         self._attr_icon = "mdi:database-refresh"
 
     @property
-    def device_info(self):
+    def device_info(self) -> DeviceInfo:
         system = (
             self.coordinator.data.get("system", {})
             if self.coordinator.data
             else {}
         )
-        return {
-            "identifiers": {(DOMAIN, self._entry.entry_id)},
-            "name": "Navidrome",
-            "manufacturer": "Navidrome",
-            "model": "Music Server",
-            "sw_version": system.get("serverVersion"),
-            "configuration_url": self.coordinator.api.base_url,
-        }
+        return DeviceInfo(
+            identifiers={(DOMAIN, self._entry.entry_id)},
+            name="Navidrome",
+            manufacturer="Navidrome",
+            model="Music Server",
+            sw_version=system.get("serverVersion"),
+            configuration_url=self.coordinator.api.base_url,
+        )
 
     @property
     def available(self):
@@ -42,5 +45,8 @@ class NavidromeStartScanButton(CoordinatorEntity, ButtonEntity):
         return not scan.get("scanning", False)
 
     async def async_press(self):
-        await self.coordinator.api.start_scan()
+        try:
+            await self.coordinator.api.start_scan()
+        except NavidromeError as err:
+            raise HomeAssistantError(f"Failed to start scan: {err}") from err
         await self.coordinator.async_request_refresh()

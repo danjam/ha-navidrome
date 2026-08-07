@@ -9,17 +9,32 @@
                     "username": "Username",
                     "password": "Password"
                 }
+            },
+            "reauth_confirm": {
+                "title": "Re-authenticate with Navidrome",
+                "description": "Your credentials have expired or changed. Please re-enter them.",
+                "data": {
+                    "username": "Username",
+                    "password": "Password"
+                }
             }
         },
         "error": {
             "cannot_connect": "Cannot connect to server",
-            "invalid_auth": "Invalid username or password"
+            "invalid_auth": "Invalid username or password",
+            "unknown": "Unexpected error"
         },
         "abort": {
-            "already_configured": "This server is already configured"
+            "already_configured": "This server is already configured",
+            "reauth_successful": "Re-authentication successful"
         }
     },
     "entity": {
+        "media_player": {
+            "now_playing": {
+                "name": "Now Playing"
+            }
+        },
         "button": {
             "start_scan": {
                 "name": "Start Scan"
@@ -30,8 +45,7 @@
                 "name": "Scan Status",
                 "state": {
                     "scanning": "Scanning",
-                    "idle": "Idle",
-                    "unknown": "Unknown"
+                    "idle": "Idle"
                 }
             },
             "last_scan": {

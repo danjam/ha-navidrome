@@ -1,10 +1,11 @@
+from homeassistant.const import Platform
+
 DOMAIN = "navidrome"
 
-CONF_URL = "url"
-CONF_USERNAME = "username"
-CONF_PASSWORD = "password"
-
-PLATFORMS = ["media_player", "sensor", "button"]
+PLATFORMS = [Platform.MEDIA_PLAYER, Platform.SENSOR, Platform.BUTTON]
 
 FALLBACK_POLL_INTERVAL = 300
-SSE_RECONNECT_DELAY = 5
+SSE_INITIAL_RECONNECT_DELAY = 5
+SSE_MAX_RECONNECT_DELAY = 60
+SSE_KEEPALIVE_TIMEOUT = 90
+STALE_PLAYBACK_BUFFER = 120

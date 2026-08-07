@@ -1,27 +1,37 @@
+import logging
+
+import aiohttp
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
+from homeassistant.exceptions import ConfigEntryAuthFailed, ConfigEntryNotReady
+from homeassistant.helpers.aiohttp_client import async_get_clientsession
 
-from .api import NavidromeAPI
-from .const import CONF_PASSWORD, CONF_URL, CONF_USERNAME, DOMAIN, PLATFORMS
+from .api import NavidromeAPI, NavidromeAuthError, NavidromeError
+from .const import DOMAIN, PLATFORMS
 from .coordinator import NavidromeCoordinator
 
-
-async def async_setup(hass: HomeAssistant, config: dict):
-    return True
+_LOGGER = logging.getLogger(__name__)
 
 
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry):
     hass.data.setdefault(DOMAIN, {})
 
+    session = async_get_clientsession(hass)
     api = NavidromeAPI(
-        entry.data[CONF_URL],
-        entry.data[CONF_USERNAME],
-        entry.data[CONF_PASSWORD],
+        entry.data["url"],
+        entry.data["username"],
+        entry.data["password"],
+        session,
     )
 
-    await api.authenticate()
+    try:
+        await api.authenticate()
+    except NavidromeAuthError as err:
+        raise ConfigEntryAuthFailed(err) from err
+    except (NavidromeError, aiohttp.ClientError, TimeoutError) as err:
+        raise ConfigEntryNotReady(err) from err
 
-    coordinator = NavidromeCoordinator(hass, api, entry.entry_id)
+    coordinator = NavidromeCoordinator(hass, api, entry)
     await coordinator.async_config_entry_first_refresh()
     await coordinator.start_sse()
 
@@ -33,13 +43,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry):
 
 
 async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry):
-    coordinator = hass.data[DOMAIN][entry.entry_id]
-    await coordinator.stop_sse()
-    await coordinator.api.close()
-
     unload_ok = await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
 
     if unload_ok:
-        hass.data[DOMAIN].pop(entry.entry_id)
+        coordinator = hass.data[DOMAIN].pop(entry.entry_id)
+        await coordinator.stop_sse()
 
     return unload_ok

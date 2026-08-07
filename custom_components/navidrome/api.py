@@ -1,4 +1,6 @@
+import asyncio
 import logging
+from urllib.parse import urlencode
 
 import aiohttp
 
@@ -14,79 +16,54 @@ class NavidromeAuthError(NavidromeError):
 
 
 class NavidromeAPI:
-    def __init__(self, base_url: str, username: str, password: str):
+    def __init__(self, base_url: str, username: str, password: str, session: aiohttp.ClientSession):
         self.base_url = base_url.rstrip("/")
         self.username = username
         self._password = password
+        self._session = session
         self._token: str | None = None
         self._subsonic_salt: str | None = None
         self._subsonic_token: str | None = None
-        self._session: aiohttp.ClientSession | None = None
-
-    async def _get_session(self) -> aiohttp.ClientSession:
-        if self._session is None or self._session.closed:
-            self._session = aiohttp.ClientSession()
-        return self._session
-
-    async def close(self):
-        if self._session and not self._session.closed:
-            await self._session.close()
+        self._auth_lock = asyncio.Lock()
 
     async def authenticate(self):
-        session = await self._get_session()
-        async with session.post(
-            f"{self.base_url}/auth/login",
-            json={"username": self.username, "password": self._password},
-        ) as resp:
-            if resp.status == 401:
-                raise NavidromeAuthError("Invalid username or password")
-            if resp.status != 200:
-                raise NavidromeError(f"Auth failed with status {resp.status}")
-            data = await resp.json()
+        async with self._auth_lock:
+            try:
+                async with self._session.post(
+                    f"{self.base_url}/auth/login",
+                    json={"username": self.username, "password": self._password},
+                    timeout=aiohttp.ClientTimeout(total=15),
+                ) as resp:
+                    if resp.status == 401:
+                        raise NavidromeAuthError("Invalid username or password")
+                    if resp.status != 200:
+                        raise NavidromeError(f"Auth failed with status {resp.status}")
+                    data = await resp.json()
+            except NavidromeError:
+                raise
+            except (aiohttp.ClientError, TimeoutError) as err:
+                raise NavidromeError(f"Connection error: {err}") from err
 
-        self._token = data.get("token")
-        self._subsonic_salt = data.get("subsonicSalt")
-        self._subsonic_token = data.get("subsonicToken")
+            token = data.get("token")
+            salt = data.get("subsonicSalt")
+            sub_token = data.get("subsonicToken")
 
-        if not self._token:
-            raise NavidromeAuthError("No token in auth response")
+            if not all((token, salt, sub_token)):
+                raise NavidromeAuthError("Incomplete auth response")
 
-    def _update_token(self, resp_headers):
-        new_token = resp_headers.get("x-nd-authorization")
-        if new_token and new_token.startswith("Bearer "):
-            self._token = new_token[7:]
+            self._token = token
+            self._subsonic_salt = salt
+            self._subsonic_token = sub_token
+
+    def invalidate_token(self):
+        self._token = None
 
     async def _ensure_auth(self):
         if not self._token:
             await self.authenticate()
 
-    async def _native_request(self, method: str, endpoint: str, **kwargs):
-        await self._ensure_auth()
-        session = await self._get_session()
-        headers = {"x-nd-authorization": f"Bearer {self._token}"}
-
-        async with session.request(
-            method, f"{self.base_url}/api/{endpoint}", headers=headers, **kwargs
-        ) as resp:
-            self._update_token(resp.headers)
-            if resp.status == 401:
-                await self.authenticate()
-                headers["x-nd-authorization"] = f"Bearer {self._token}"
-                async with session.request(
-                    method,
-                    f"{self.base_url}/api/{endpoint}",
-                    headers=headers,
-                    **kwargs,
-                ) as retry_resp:
-                    self._update_token(retry_resp.headers)
-                    retry_resp.raise_for_status()
-                    return await retry_resp.json()
-            resp.raise_for_status()
-            return await resp.json()
-
     async def _subsonic_request(self, endpoint: str, params: dict | None = None):
         await self._ensure_auth()
-        session = await self._get_session()
 
         base_params = {
             "u": self.username,
@@ -99,12 +76,16 @@ class NavidromeAPI:
         if params:
             base_params.update(params)
 
-        async with session.get(
-            f"{self.base_url}/rest/{endpoint}",
-            params=base_params,
-        ) as resp:
-            resp.raise_for_status()
-            data = await resp.json()
+        try:
+            async with self._session.get(
+                f"{self.base_url}/rest/{endpoint}",
+                params=base_params,
+                timeout=aiohttp.ClientTimeout(total=15),
+            ) as resp:
+                resp.raise_for_status()
+                data = await resp.json()
+        except (aiohttp.ClientError, TimeoutError) as err:
+            raise NavidromeError(f"Request failed: {err}") from err
 
         subsonic_resp = data.get("subsonic-response", {})
         if subsonic_resp.get("status") != "ok":
@@ -112,7 +93,7 @@ class NavidromeAPI:
             code = error.get("code", 0)
             msg = error.get("message", "Unknown error")
             if code in (40, 41, 44):
-                self._token = None
+                self.invalidate_token()
                 raise NavidromeAuthError(msg)
             raise NavidromeError(f"API error {code}: {msg}")
 
@@ -146,16 +127,16 @@ class NavidromeAPI:
         return data.get("playlists", {}).get("playlist", [])
 
     def get_cover_art_url(self, cover_id: str) -> str:
-        return (
-            f"{self.base_url}/rest/getCoverArt.view"
-            f"?id={cover_id}"
-            f"&u={self.username}"
-            f"&s={self._subsonic_salt}"
-            f"&t={self._subsonic_token}"
-            f"&v=1.16.1"
-            f"&c=ha-navidrome"
-        )
+        params = urlencode({
+            "id": cover_id,
+            "u": self.username,
+            "s": self._subsonic_salt,
+            "t": self._subsonic_token,
+            "v": "1.16.1",
+            "c": "ha-navidrome",
+        })
+        return f"{self.base_url}/rest/getCoverArt.view?{params}"
 
     @property
-    def sse_url(self) -> str:
-        return f"{self.base_url}/events?jwt={self._token}"
+    def sse_headers(self) -> dict:
+        return {"x-nd-authorization": f"Bearer {self._token}"}

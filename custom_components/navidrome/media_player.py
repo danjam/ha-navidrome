@@ -6,9 +6,10 @@ from homeassistant.components.media_player import (
     MediaPlayerState,
     MediaType,
 )
+from homeassistant.helpers.device_registry import DeviceInfo
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
-from .const import DOMAIN
+from .const import DOMAIN, STALE_PLAYBACK_BUFFER
 
 
 async def async_setup_entry(hass, entry, async_add_entities):
@@ -18,15 +19,13 @@ async def async_setup_entry(hass, entry, async_add_entities):
 
 class NavidromeMediaPlayer(CoordinatorEntity, MediaPlayerEntity):
     _attr_has_entity_name = True
-    _attr_name = "Now Playing"
+    _attr_translation_key = "now_playing"
     _attr_supported_features = MediaPlayerEntityFeature(0)
 
     def __init__(self, coordinator, entry):
         super().__init__(coordinator)
         self._entry = entry
         self._attr_unique_id = f"{entry.entry_id}_media_player"
-        self._cached_cover_url: str | None = None
-        self._cached_cover_id: str | None = None
 
     @property
     def state(self):
@@ -36,20 +35,20 @@ class NavidromeMediaPlayer(CoordinatorEntity, MediaPlayerEntity):
         return MediaPlayerState.PLAYING
 
     @property
-    def device_info(self):
+    def device_info(self) -> DeviceInfo:
         system = (
             self.coordinator.data.get("system", {})
             if self.coordinator.data
             else {}
         )
-        return {
-            "identifiers": {(DOMAIN, self._entry.entry_id)},
-            "name": "Navidrome",
-            "manufacturer": "Navidrome",
-            "model": "Music Server",
-            "sw_version": system.get("serverVersion"),
-            "configuration_url": self.coordinator.api.base_url,
-        }
+        return DeviceInfo(
+            identifiers={(DOMAIN, self._entry.entry_id)},
+            name="Navidrome",
+            manufacturer="Navidrome",
+            model="Music Server",
+            sw_version=system.get("serverVersion"),
+            configuration_url=self.coordinator.api.base_url,
+        )
 
     def _get_current_track(self):
         data = self.coordinator.data
@@ -58,7 +57,19 @@ class NavidromeMediaPlayer(CoordinatorEntity, MediaPlayerEntity):
         tracks = data.get("now_playing")
         if not tracks:
             return None
-        return tracks[0]
+
+        active = []
+        for t in tracks:
+            minutes_ago = t.get("minutesAgo", 0)
+            duration = t.get("duration", 0)
+            if duration <= 0 or (minutes_ago * 60) <= (duration + STALE_PLAYBACK_BUFFER):
+                active.append(t)
+
+        if not active:
+            return None
+
+        active.sort(key=lambda t: t.get("minutesAgo", 0))
+        return active[0]
 
     def _get(self, key):
         track = self._get_current_track()
@@ -104,15 +115,8 @@ class NavidromeMediaPlayer(CoordinatorEntity, MediaPlayerEntity):
     def media_image_url(self):
         cover_id = self._get("coverArt")
         if not cover_id:
-            self._cached_cover_url = None
-            self._cached_cover_id = None
             return None
-
-        if cover_id != self._cached_cover_id:
-            self._cached_cover_url = self.coordinator.api.get_cover_art_url(cover_id)
-            self._cached_cover_id = cover_id
-
-        return self._cached_cover_url
+        return self.coordinator.api.get_cover_art_url(cover_id)
 
     @property
     def media_image_hash(self):

@@ -4,37 +4,46 @@ import logging
 from datetime import timedelta
 
 import aiohttp
+from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.update_coordinator import (
     DataUpdateCoordinator,
     UpdateFailed,
 )
 
-from .api import NavidromeAPI, NavidromeError
-from .const import FALLBACK_POLL_INTERVAL, SSE_RECONNECT_DELAY
+from .api import NavidromeAPI, NavidromeAuthError, NavidromeError
+from .const import (
+    FALLBACK_POLL_INTERVAL,
+    SSE_INITIAL_RECONNECT_DELAY,
+    SSE_KEEPALIVE_TIMEOUT,
+    SSE_MAX_RECONNECT_DELAY,
+)
 
 _LOGGER = logging.getLogger(__name__)
 
 
 class NavidromeCoordinator(DataUpdateCoordinator):
-    def __init__(self, hass: HomeAssistant, api: NavidromeAPI, entry_id: str):
+    def __init__(self, hass: HomeAssistant, api: NavidromeAPI, entry: ConfigEntry):
         super().__init__(
             hass,
             _LOGGER,
             name="navidrome",
             update_interval=timedelta(seconds=FALLBACK_POLL_INTERVAL),
+            config_entry=entry,
         )
         self.api = api
-        self.entry_id = entry_id
         self._sse_task: asyncio.Task | None = None
-        self._sse_connected = False
+        self._sse_session: aiohttp.ClientSession | None = None
         self._library_data: dict = {}
+        self._library_refresh_pending = False
 
     async def _async_update_data(self) -> dict:
         try:
-            now_playing = await self.api.get_now_playing()
-            scan_status = await self.api.get_scan_status()
-            system = await self.api.get_system_info()
+            now_playing, scan_status, system = await asyncio.gather(
+                self.api.get_now_playing(),
+                self.api.get_scan_status(),
+                self.api.get_system_info(),
+            )
 
             if not self._library_data:
                 await self._refresh_library()
@@ -45,15 +54,17 @@ class NavidromeCoordinator(DataUpdateCoordinator):
                 "system": system,
                 **self._library_data,
             }
-        except NavidromeError as err:
+        except NavidromeAuthError as err:
             raise UpdateFailed(str(err)) from err
-        except Exception as err:
+        except NavidromeError as err:
             raise UpdateFailed(str(err)) from err
 
     async def _refresh_library(self):
-        genres = await self.api.get_genres()
-        artists = await self.api.get_artists()
-        playlists = await self.api.get_playlists()
+        genres, artists, playlists = await asyncio.gather(
+            self.api.get_genres(),
+            self.api.get_artists(),
+            self.api.get_playlists(),
+        )
         self._library_data = {
             "genres": genres,
             "artists": artists,
@@ -71,38 +82,71 @@ class NavidromeCoordinator(DataUpdateCoordinator):
                 await self._sse_task
             except asyncio.CancelledError:
                 pass
-        self._sse_connected = False
+        if self._sse_session and not self._sse_session.closed:
+            await self._sse_session.close()
+            self._sse_session = None
 
     async def _sse_loop(self):
+        delay = SSE_INITIAL_RECONNECT_DELAY
+        first_failure = True
+
         while True:
             try:
                 await self._sse_listen()
+                delay = SSE_INITIAL_RECONNECT_DELAY
+                first_failure = True
             except asyncio.CancelledError:
                 raise
-            except Exception:
-                _LOGGER.debug("SSE connection lost, reconnecting in %ss", SSE_RECONNECT_DELAY)
-                self._sse_connected = False
-                await asyncio.sleep(SSE_RECONNECT_DELAY)
+            except Exception as err:
+                if first_failure:
+                    _LOGGER.warning("SSE connection lost: %s", err)
+                    first_failure = False
+                else:
+                    _LOGGER.debug("SSE reconnect failed: %s", err)
+                await asyncio.sleep(delay)
+                delay = min(delay * 2, SSE_MAX_RECONNECT_DELAY)
 
     async def _sse_listen(self):
         await self.api._ensure_auth()
-        url = self.api.sse_url
 
-        async with aiohttp.ClientSession() as session:
-            async with session.get(url) as resp:
+        if self._sse_session and not self._sse_session.closed:
+            await self._sse_session.close()
+
+        self._sse_session = aiohttp.ClientSession()
+
+        try:
+            async with self._sse_session.get(
+                f"{self.api.base_url}/events",
+                headers=self.api.sse_headers,
+                timeout=aiohttp.ClientTimeout(
+                    total=None,
+                    sock_connect=10,
+                    sock_read=SSE_KEEPALIVE_TIMEOUT,
+                ),
+            ) as resp:
+                if resp.status in (401, 403):
+                    _LOGGER.debug("SSE auth failed, re-authenticating")
+                    self.api.invalidate_token()
+                    return
+
                 if resp.status != 200:
                     _LOGGER.warning("SSE connection failed with status %s", resp.status)
                     return
 
-                self._sse_connected = True
                 _LOGGER.debug("SSE connected to Navidrome")
 
                 buffer = ""
                 async for chunk in resp.content.iter_any():
-                    buffer += chunk.decode("utf-8", errors="replace")
+                    buffer += chunk.decode("utf-8", errors="replace").replace("\r\n", "\n")
                     while "\n\n" in buffer:
                         event_block, buffer = buffer.split("\n\n", 1)
                         await self._handle_sse_block(event_block)
+        except (aiohttp.ClientError, TimeoutError):
+            raise
+        finally:
+            if self._sse_session and not self._sse_session.closed:
+                await self._sse_session.close()
+                self._sse_session = None
 
     async def _handle_sse_block(self, block: str):
         event_type = None
@@ -125,7 +169,10 @@ class NavidromeCoordinator(DataUpdateCoordinator):
             except json.JSONDecodeError:
                 data = data_str
 
-        await self._process_event(event_type, data)
+        try:
+            await self._process_event(event_type, data)
+        except Exception:
+            _LOGGER.debug("Error processing SSE event %s", event_type, exc_info=True)
 
     async def _process_event(self, event_type: str, data):
         if event_type == "nowPlayingCount":
@@ -135,7 +182,10 @@ class NavidromeCoordinator(DataUpdateCoordinator):
                 await self._refresh_library()
             await self.async_request_refresh()
         elif event_type == "refreshResource":
-            await self._refresh_library()
-            await self.async_request_refresh()
-        elif event_type == "keepAlive":
-            pass
+            scanning = (
+                self.data
+                and self.data.get("scan_status", {}).get("scanning", False)
+            )
+            if not scanning:
+                await self._refresh_library()
+                await self.async_request_refresh()

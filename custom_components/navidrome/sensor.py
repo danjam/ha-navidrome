@@ -1,7 +1,7 @@
-from datetime import datetime
-
-from homeassistant.components.sensor import SensorEntity
+from homeassistant.components.sensor import SensorDeviceClass, SensorEntity
+from homeassistant.helpers.device_registry import DeviceInfo
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
+from homeassistant.util import dt as dt_util
 
 from .const import DOMAIN
 
@@ -26,20 +26,20 @@ class BaseNavidromeSensor(CoordinatorEntity, SensorEntity):
         self._entry = entry
 
     @property
-    def device_info(self):
+    def device_info(self) -> DeviceInfo:
         system = (
             self.coordinator.data.get("system", {})
             if self.coordinator.data
             else {}
         )
-        return {
-            "identifiers": {(DOMAIN, self._entry.entry_id)},
-            "name": "Navidrome",
-            "manufacturer": "Navidrome",
-            "model": "Music Server",
-            "sw_version": system.get("serverVersion"),
-            "configuration_url": self.coordinator.api.base_url,
-        }
+        return DeviceInfo(
+            identifiers={(DOMAIN, self._entry.entry_id)},
+            name="Navidrome",
+            manufacturer="Navidrome",
+            model="Music Server",
+            sw_version=system.get("serverVersion"),
+            configuration_url=self.coordinator.api.base_url,
+        )
 
 
 class NavidromeScanStatusSensor(BaseNavidromeSensor):
@@ -48,15 +48,17 @@ class NavidromeScanStatusSensor(BaseNavidromeSensor):
         self._attr_has_entity_name = True
         self._attr_translation_key = "scan_status"
         self._attr_unique_id = f"{entry.entry_id}_scan_status"
+        self._attr_device_class = SensorDeviceClass.ENUM
+        self._attr_options = ["scanning", "idle"]
 
     @property
     def native_value(self):
         data = self.coordinator.data
         if not data:
-            return "unknown"
+            return None
         scan = data.get("scan_status")
         if not scan:
-            return "unknown"
+            return None
         return "scanning" if scan.get("scanning") else "idle"
 
 
@@ -66,7 +68,7 @@ class NavidromeLastScanSensor(BaseNavidromeSensor):
         self._attr_has_entity_name = True
         self._attr_translation_key = "last_scan"
         self._attr_unique_id = f"{entry.entry_id}_last_scan"
-        self._attr_device_class = "timestamp"
+        self._attr_device_class = SensorDeviceClass.TIMESTAMP
 
     @property
     def native_value(self):
@@ -79,7 +81,7 @@ class NavidromeLastScanSensor(BaseNavidromeSensor):
         last_scan = scan.get("lastScan")
         if not last_scan:
             return None
-        return datetime.fromisoformat(last_scan.replace("Z", "+00:00"))
+        return dt_util.parse_datetime(last_scan)
 
 
 class NavidromeTotalGenresSensor(BaseNavidromeSensor):
