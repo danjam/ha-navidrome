@@ -58,11 +58,15 @@ class NavidromeMediaPlayer(CoordinatorEntity, MediaPlayerEntity):
         if not tracks:
             return None
 
+        max_stale_minutes = 10
         active = []
         for t in tracks:
             minutes_ago = t.get("minutesAgo", 0)
             duration = t.get("duration", 0)
-            if duration <= 0 or (minutes_ago * 60) <= (duration + STALE_PLAYBACK_BUFFER):
+            if duration > 0:
+                if (minutes_ago * 60) <= (duration + STALE_PLAYBACK_BUFFER):
+                    active.append(t)
+            elif minutes_ago <= max_stale_minutes:
                 active.append(t)
 
         if not active:

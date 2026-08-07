@@ -1,4 +1,5 @@
 import asyncio
+import codecs
 import json
 import logging
 from datetime import timedelta
@@ -6,6 +7,7 @@ from datetime import timedelta
 import aiohttp
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
+from homeassistant.exceptions import ConfigEntryAuthFailed
 from homeassistant.helpers.update_coordinator import (
     DataUpdateCoordinator,
     UpdateFailed,
@@ -35,7 +37,6 @@ class NavidromeCoordinator(DataUpdateCoordinator):
         self._sse_task: asyncio.Task | None = None
         self._sse_session: aiohttp.ClientSession | None = None
         self._library_data: dict = {}
-        self._library_refresh_pending = False
 
     async def _async_update_data(self) -> dict:
         try:
@@ -55,7 +56,7 @@ class NavidromeCoordinator(DataUpdateCoordinator):
                 **self._library_data,
             }
         except NavidromeAuthError as err:
-            raise UpdateFailed(str(err)) from err
+            raise ConfigEntryAuthFailed(str(err)) from err
         except NavidromeError as err:
             raise UpdateFailed(str(err)) from err
 
@@ -93,18 +94,21 @@ class NavidromeCoordinator(DataUpdateCoordinator):
         while True:
             try:
                 await self._sse_listen()
-                delay = SSE_INITIAL_RECONNECT_DELAY
-                first_failure = True
             except asyncio.CancelledError:
                 raise
+            except NavidromeAuthError:
+                _LOGGER.warning("SSE authentication failed, starting reauth")
+                self.config_entry.async_start_reauth(self.hass)
+                return
             except Exception as err:
                 if first_failure:
                     _LOGGER.warning("SSE connection lost: %s", err)
                     first_failure = False
                 else:
                     _LOGGER.debug("SSE reconnect failed: %s", err)
-                await asyncio.sleep(delay)
-                delay = min(delay * 2, SSE_MAX_RECONNECT_DELAY)
+
+            await asyncio.sleep(delay)
+            delay = min(delay * 2, SSE_MAX_RECONNECT_DELAY)
 
     async def _sse_listen(self):
         await self.api._ensure_auth()
@@ -116,7 +120,7 @@ class NavidromeCoordinator(DataUpdateCoordinator):
 
         try:
             async with self._sse_session.get(
-                f"{self.api.base_url}/events",
+                f"{self.api.base_url}/api/events",
                 headers=self.api.sse_headers,
                 timeout=aiohttp.ClientTimeout(
                     total=None,
@@ -125,24 +129,22 @@ class NavidromeCoordinator(DataUpdateCoordinator):
                 ),
             ) as resp:
                 if resp.status in (401, 403):
-                    _LOGGER.debug("SSE auth failed, re-authenticating")
                     self.api.invalidate_token()
-                    return
+                    raise NavidromeAuthError("SSE authentication failed")
 
                 if resp.status != 200:
-                    _LOGGER.warning("SSE connection failed with status %s", resp.status)
-                    return
+                    raise NavidromeError(f"SSE connection failed with status {resp.status}")
 
                 _LOGGER.debug("SSE connected to Navidrome")
 
+                decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
                 buffer = ""
                 async for chunk in resp.content.iter_any():
-                    buffer += chunk.decode("utf-8", errors="replace").replace("\r\n", "\n")
+                    buffer += decoder.decode(chunk, final=False)
+                    buffer = buffer.replace("\r\n", "\n")
                     while "\n\n" in buffer:
                         event_block, buffer = buffer.split("\n\n", 1)
                         await self._handle_sse_block(event_block)
-        except (aiohttp.ClientError, TimeoutError):
-            raise
         finally:
             if self._sse_session and not self._sse_session.closed:
                 await self._sse_session.close()
@@ -153,6 +155,7 @@ class NavidromeCoordinator(DataUpdateCoordinator):
         data_lines = []
 
         for line in block.split("\n"):
+            line = line.rstrip("\r")
             if line.startswith("event:"):
                 event_type = line[6:].strip()
             elif line.startswith("data:"):

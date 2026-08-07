@@ -39,7 +39,7 @@ class NavidromeStartScanButton(CoordinatorEntity, ButtonEntity):
 
     @property
     def available(self):
-        if not self.coordinator.data:
+        if not super().available:
             return False
         scan = self.coordinator.data.get("scan_status", {})
         return not scan.get("scanning", False)

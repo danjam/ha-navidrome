@@ -3,6 +3,11 @@ import logging
 import voluptuous as vol
 from homeassistant import config_entries
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
+from homeassistant.helpers.selector import (
+    TextSelector,
+    TextSelectorConfig,
+    TextSelectorType,
+)
 
 from .api import NavidromeAPI, NavidromeAuthError, NavidromeError
 from .const import DOMAIN
@@ -42,9 +47,13 @@ class NavidromeConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
 
         schema = vol.Schema(
             {
-                vol.Required("url"): str,
+                vol.Required("url"): TextSelector(
+                    TextSelectorConfig(type=TextSelectorType.URL)
+                ),
                 vol.Required("username"): str,
-                vol.Required("password"): str,
+                vol.Required("password"): TextSelector(
+                    TextSelectorConfig(type=TextSelectorType.PASSWORD)
+                ),
             }
         )
 
@@ -88,7 +97,9 @@ class NavidromeConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         schema = vol.Schema(
             {
                 vol.Required("username"): str,
-                vol.Required("password"): str,
+                vol.Required("password"): TextSelector(
+                    TextSelectorConfig(type=TextSelectorType.PASSWORD)
+                ),
             }
         )
 

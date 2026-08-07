@@ -1,14 +1,14 @@
 {
     "domain": "navidrome",
-    "icon": "mdi:music",
     "name": "Navidrome",
-    "version": "1.0.0",
-    "documentation": "https://github.com/danjam/ha-navidrome",
-    "issue_tracker": "https://github.com/danjam/ha-navidrome/issues",
-    "requirements": [],
-    "dependencies": [],
     "codeowners": ["@danjam"],
-    "iot_class": "local_push",
     "config_flow": true,
-    "loggers": ["custom_components.navidrome"]
+    "dependencies": [],
+    "documentation": "https://github.com/danjam/ha-navidrome",
+    "integration_type": "service",
+    "iot_class": "local_push",
+    "issue_tracker": "https://github.com/danjam/ha-navidrome/issues",
+    "loggers": ["custom_components.navidrome"],
+    "requirements": [],
+    "version": "1.0.0"
 }
