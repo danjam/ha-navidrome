@@ -1,0 +1,54 @@
+{
+    "config": {
+        "step": {
+            "user": {
+                "title": "Connect to Navidrome",
+                "description": "Enter the full URL of your Navidrome server (e.g. https://music.example.com).",
+                "data": {
+                    "url": "URL",
+                    "username": "Username",
+                    "password": "Password"
+                }
+            }
+        },
+        "error": {
+            "cannot_connect": "Cannot connect to server",
+            "invalid_auth": "Invalid username or password"
+        },
+        "abort": {
+            "already_configured": "This server is already configured"
+        }
+    },
+    "entity": {
+        "button": {
+            "start_scan": {
+                "name": "Start Scan"
+            }
+        },
+        "sensor": {
+            "scan_status": {
+                "name": "Scan Status",
+                "state": {
+                    "scanning": "Scanning",
+                    "idle": "Idle",
+                    "unknown": "Unknown"
+                }
+            },
+            "last_scan": {
+                "name": "Last Scan"
+            },
+            "total_genres": {
+                "name": "Total Genres"
+            },
+            "total_artists": {
+                "name": "Total Artists"
+            },
+            "total_songs": {
+                "name": "Total Songs"
+            },
+            "total_playlists": {
+                "name": "Total Playlists"
+            }
+        }
+    }
+}

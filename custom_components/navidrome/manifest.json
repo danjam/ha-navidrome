@@ -1,0 +1,13 @@
+{
+    "domain": "navidrome",
+    "icon": "mdi:music",
+    "name": "Navidrome",
+    "version": "1.0.0",
+    "documentation": "https://github.com/danjam/ha-navidrome",
+    "issue_tracker": "https://github.com/danjam/ha-navidrome/issues",
+    "requirements": ["aiohttp>=3.9.0"],
+    "dependencies": [],
+    "codeowners": ["@danjam"],
+    "iot_class": "local_push",
+    "config_flow": true
+}
