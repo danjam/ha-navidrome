@@ -1,5 +1,8 @@
 import asyncio
+import hashlib
 import logging
+import secrets
+import string
 from urllib.parse import urlencode
 
 import aiohttp
@@ -22,8 +25,6 @@ class NavidromeAPI:
         self._password = password
         self._session = session
         self._token: str | None = None
-        self._subsonic_salt: str | None = None
-        self._subsonic_token: str | None = None
         self._auth_lock = asyncio.Lock()
 
     async def authenticate(self):
@@ -48,15 +49,10 @@ class NavidromeAPI:
                 raise NavidromeError(f"Connection error: {err}") from err
 
             token = data.get("token")
-            salt = data.get("subsonicSalt")
-            sub_token = data.get("subsonicToken")
-
-            if not all((token, salt, sub_token)):
-                raise NavidromeAuthError("Incomplete auth response")
+            if not token:
+                raise NavidromeAuthError("No token in auth response")
 
             self._token = token
-            self._subsonic_salt = salt
-            self._subsonic_token = sub_token
 
     def invalidate_token(self):
         self._token = None
@@ -65,13 +61,19 @@ class NavidromeAPI:
         if not self._token:
             await self.authenticate()
 
+    def _subsonic_salt_token(self):
+        alphabet = string.ascii_letters + string.digits
+        salt = "".join(secrets.choice(alphabet) for _ in range(16))
+        token = hashlib.md5((self._password + salt).encode()).hexdigest()
+        return salt, token
+
     async def _subsonic_request(self, endpoint: str, params: dict | None = None):
-        await self._ensure_auth()
+        salt, token = self._subsonic_salt_token()
 
         base_params = {
             "u": self.username,
-            "s": self._subsonic_salt,
-            "t": self._subsonic_token,
+            "t": token,
+            "s": salt,
             "v": "1.16.1",
             "c": "ha-navidrome",
             "f": "json",
@@ -99,7 +101,6 @@ class NavidromeAPI:
             code = error.get("code", 0)
             msg = error.get("message", "Unknown error")
             if code in (40, 41, 44):
-                self.invalidate_token()
                 raise NavidromeAuthError(msg)
             raise NavidromeError(f"API error {code}: {msg}")
 
@@ -133,11 +134,12 @@ class NavidromeAPI:
         return data.get("playlists", {}).get("playlist", [])
 
     def get_cover_art_url(self, cover_id: str) -> str:
+        salt, token = self._subsonic_salt_token()
         params = urlencode({
             "id": cover_id,
             "u": self.username,
-            "s": self._subsonic_salt,
-            "t": self._subsonic_token,
+            "t": token,
+            "s": salt,
             "v": "1.16.1",
             "c": "ha-navidrome",
         })
