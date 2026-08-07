@@ -1,4 +1,5 @@
 import hashlib
+from datetime import datetime, timezone
 
 from homeassistant.components.media_player import (
     MediaPlayerEntity,
@@ -10,6 +11,13 @@ from homeassistant.helpers.device_registry import DeviceInfo
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
 from .const import DOMAIN, STALE_PLAYBACK_BUFFER
+
+STATE_MAP = {
+    "starting": MediaPlayerState.PLAYING,
+    "playing": MediaPlayerState.PLAYING,
+    "paused": MediaPlayerState.PAUSED,
+    "stopped": None,
+}
 
 
 async def async_setup_entry(hass, entry, async_add_entities):
@@ -32,6 +40,14 @@ class NavidromeMediaPlayer(CoordinatorEntity, MediaPlayerEntity):
         track = self._get_current_track()
         if not track:
             return MediaPlayerState.IDLE
+
+        server_state = track.get("state")
+        if server_state is not None:
+            mapped = STATE_MAP.get(server_state)
+            if mapped is None:
+                return MediaPlayerState.IDLE
+            return mapped
+
         return MediaPlayerState.PLAYING
 
     @property
@@ -58,16 +74,21 @@ class NavidromeMediaPlayer(CoordinatorEntity, MediaPlayerEntity):
         if not tracks:
             return None
 
-        max_stale_minutes = 10
         active = []
         for t in tracks:
-            minutes_ago = t.get("minutesAgo", 0)
-            duration = t.get("duration", 0)
-            if duration > 0:
-                if (minutes_ago * 60) <= (duration + STALE_PLAYBACK_BUFFER):
+            server_state = t.get("state")
+            if server_state is not None:
+                if server_state in ("starting", "playing", "paused"):
                     active.append(t)
-            elif minutes_ago <= max_stale_minutes:
-                active.append(t)
+            else:
+                max_stale_minutes = 10
+                minutes_ago = t.get("minutesAgo", 0)
+                duration = t.get("duration", 0)
+                if duration > 0:
+                    if (minutes_ago * 60) <= (duration + STALE_PLAYBACK_BUFFER):
+                        active.append(t)
+                elif minutes_ago <= max_stale_minutes:
+                    active.append(t)
 
         if not active:
             return None
@@ -99,10 +120,15 @@ class NavidromeMediaPlayer(CoordinatorEntity, MediaPlayerEntity):
 
     @property
     def media_position(self):
+        position_ms = self._get("positionMs")
+        if position_ms is not None:
+            return position_ms // 1000
         return None
 
     @property
     def media_position_updated_at(self):
+        if self._get("positionMs") is not None:
+            return datetime.now(timezone.utc)
         return None
 
     @property
@@ -145,5 +171,6 @@ class NavidromeMediaPlayer(CoordinatorEntity, MediaPlayerEntity):
             "channel_count": track.get("channelCount"),
             "player_name": track.get("playerName"),
             "username": track.get("username"),
+            "playback_rate": track.get("playbackRate"),
         }
         return {k: v for k, v in attrs.items() if v is not None}
