@@ -28,6 +28,9 @@ class NavidromeAPI:
 
     async def authenticate(self):
         async with self._auth_lock:
+            if self._token:
+                return
+
             try:
                 async with self._session.post(
                     f"{self.base_url}/auth/login",
@@ -86,6 +89,9 @@ class NavidromeAPI:
                 data = await resp.json()
         except (aiohttp.ClientError, TimeoutError) as err:
             raise NavidromeError(f"Request failed: {err}") from err
+
+        if not isinstance(data, dict):
+            raise NavidromeError("Unexpected response format")
 
         subsonic_resp = data.get("subsonic-response", {})
         if subsonic_resp.get("status") != "ok":

@@ -94,12 +94,21 @@ class NavidromeCoordinator(DataUpdateCoordinator):
         while True:
             try:
                 await self._sse_listen()
+                delay = SSE_INITIAL_RECONNECT_DELAY
+                first_failure = True
             except asyncio.CancelledError:
                 raise
             except NavidromeAuthError:
-                _LOGGER.warning("SSE authentication failed, starting reauth")
-                self.config_entry.async_start_reauth(self.hass)
-                return
+                try:
+                    await self.api.authenticate()
+                    _LOGGER.debug("SSE re-authenticated after token expiry")
+                    delay = SSE_INITIAL_RECONNECT_DELAY
+                    first_failure = True
+                    continue
+                except NavidromeAuthError:
+                    _LOGGER.warning("SSE credentials invalid, starting reauth")
+                    self.config_entry.async_start_reauth(self.hass)
+                    return
             except Exception as err:
                 if first_failure:
                     _LOGGER.warning("SSE connection lost: %s", err)
