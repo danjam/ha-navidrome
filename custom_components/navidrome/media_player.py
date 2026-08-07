@@ -127,7 +127,7 @@ class NavidromeMediaPlayer(CoordinatorEntity, MediaPlayerEntity):
 
     @property
     def media_position_updated_at(self):
-        if self._get("positionMs") is not None:
+        if self._get("positionMs") is not None and self.state == MediaPlayerState.PLAYING:
             return datetime.now(timezone.utc)
         return None
 
