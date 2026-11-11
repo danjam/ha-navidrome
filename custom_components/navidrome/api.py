@@ -89,8 +89,12 @@ class NavidromeAPI:
             ) as resp:
                 resp.raise_for_status()
                 data = await resp.json()
+        # aiohttp error strings include the request URL, whose query carries the
+        # reusable Subsonic auth (u/t/s), so never format err or chain it.
+        except aiohttp.ClientResponseError as err:
+            raise NavidromeError(f"{endpoint} failed: HTTP {err.status}") from None
         except (aiohttp.ClientError, TimeoutError) as err:
-            raise NavidromeError(f"Request failed: {err}") from err
+            raise NavidromeError(f"{endpoint} failed: {type(err).__name__}") from None
 
         if not isinstance(data, dict):
             raise NavidromeError("Unexpected response format")
