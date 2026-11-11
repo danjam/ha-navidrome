@@ -42,6 +42,7 @@ class NavidromeCoordinator(DataUpdateCoordinator):
         self._sse_session: aiohttp.ClientSession | None = None
         self._library_data: dict = {}
         self._library_refreshed_at = 0.0
+        self._song_count: int | None = None
         self._library_debouncer = Debouncer(
             hass,
             _LOGGER,
@@ -66,10 +67,16 @@ class NavidromeCoordinator(DataUpdateCoordinator):
             ):
                 await self._refresh_library()
 
+            # When idle, count is the libraries' total songs; mid-scan it's
+            # scan progress, so keep the last idle value.
+            if not scan_status.get("scanning", False) and "count" in scan_status:
+                self._song_count = scan_status["count"]
+
             return {
                 "now_playing": now_playing,
                 "scan_status": scan_status,
                 "system": system,
+                "song_count": self._song_count,
                 **self._library_data,
             }
         except NavidromeAuthError as err:

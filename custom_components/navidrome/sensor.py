@@ -127,11 +127,12 @@ class NavidromeTotalSongsSensor(BaseNavidromeSensor):
 
     @property
     def native_value(self):
+        # Navidrome's library total via getScanStatus. Summing genre songCount
+        # double-counts multi-genre tracks and misses untagged ones.
         data = self.coordinator.data
         if not data:
-            return 0
-        genres = data.get("genres", [])
-        return sum(g.get("songCount", 0) for g in genres)
+            return None
+        return data.get("song_count")
 
 
 class NavidromeTotalPlaylistsSensor(BaseNavidromeSensor):
