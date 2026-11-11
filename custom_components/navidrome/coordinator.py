@@ -40,6 +40,7 @@ class NavidromeCoordinator(DataUpdateCoordinator):
         self.api = api
         self._sse_task: asyncio.Task | None = None
         self._sse_session: aiohttp.ClientSession | None = None
+        self._sse_connected = False
         self._library_data: dict = {}
         self._library_refreshed_at = 0.0
         self._song_count: int | None = None
@@ -127,9 +128,12 @@ class NavidromeCoordinator(DataUpdateCoordinator):
         first_failure = True
 
         while True:
+            # Set by _sse_listen once the stream is up (HTTP 200). Backoff and
+            # the "connection lost" warning reset only after a real connection,
+            # not after a re-login that may be followed by another 401.
+            self._sse_connected = False
             try:
                 await self._sse_listen()
-                delay = SSE_INITIAL_RECONNECT_DELAY
                 first_failure = True
             except asyncio.CancelledError:
                 raise
@@ -137,8 +141,6 @@ class NavidromeCoordinator(DataUpdateCoordinator):
                 try:
                     await self.api.authenticate()
                     _LOGGER.debug("SSE re-authenticated after token expiry")
-                    delay = SSE_INITIAL_RECONNECT_DELAY
-                    first_failure = True
                 except NavidromeAuthError:
                     _LOGGER.warning("SSE credentials invalid, starting reauth")
                     self.config_entry.async_start_reauth(self.hass)
@@ -146,11 +148,14 @@ class NavidromeCoordinator(DataUpdateCoordinator):
                 except NavidromeError as err:
                     _LOGGER.debug("SSE re-auth failed (server unavailable): %s", err)
             except Exception as err:
-                if first_failure:
+                if first_failure or self._sse_connected:
                     _LOGGER.warning("SSE connection lost: %s", err)
                     first_failure = False
                 else:
                     _LOGGER.debug("SSE reconnect failed: %s", err)
+
+            if self._sse_connected:
+                delay = SSE_INITIAL_RECONNECT_DELAY
 
             await asyncio.sleep(delay)
             delay = min(delay * 2, SSE_MAX_RECONNECT_DELAY)
@@ -179,6 +184,8 @@ class NavidromeCoordinator(DataUpdateCoordinator):
 
                 if resp.status != 200:
                     raise NavidromeError(f"SSE connection failed with status {resp.status}")
+
+                self._sse_connected = True
 
                 _LOGGER.debug("SSE connected to Navidrome")
 
