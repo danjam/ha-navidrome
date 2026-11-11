@@ -34,6 +34,7 @@ class NavidromeMediaPlayer(CoordinatorEntity, MediaPlayerEntity):
         super().__init__(coordinator)
         self._entry = entry
         self._attr_unique_id = f"{entry.entry_id}_media_player"
+        self._cover_cache = None
 
     @property
     def state(self):
@@ -142,18 +143,24 @@ class NavidromeMediaPlayer(CoordinatorEntity, MediaPlayerEntity):
         return self._get("id")
 
     @property
-    def media_image_url(self):
-        cover_id = self._get("coverArt")
-        if not cover_id:
-            return None
-        return self.coordinator.api.get_cover_art_url(cover_id)
-
-    @property
     def media_image_hash(self):
         cover_id = self._get("coverArt")
         if not cover_id:
             return None
         return hashlib.sha1(cover_id.encode()).hexdigest()[:8]
+
+    async def async_get_media_image(self):
+        # Served directly (no media_image_url) so HA never holds the
+        # token-bearing cover art URL. Keeps the last image to avoid refetching.
+        cover_id = self._get("coverArt")
+        if not cover_id:
+            return None, None
+        if self._cover_cache and self._cover_cache[0] == cover_id:
+            return self._cover_cache[1]
+        image = await self.coordinator.api.get_cover_art(cover_id)
+        if image[0] is not None:
+            self._cover_cache = (cover_id, image)
+        return image
 
     @property
     def extra_state_attributes(self):
