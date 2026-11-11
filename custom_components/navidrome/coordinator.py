@@ -2,12 +2,14 @@ import asyncio
 import codecs
 import json
 import logging
+import time
 from datetime import timedelta
 
 import aiohttp
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import ConfigEntryAuthFailed
+from homeassistant.helpers.debounce import Debouncer
 from homeassistant.helpers.update_coordinator import (
     DataUpdateCoordinator,
     UpdateFailed,
@@ -16,6 +18,8 @@ from homeassistant.helpers.update_coordinator import (
 from .api import NavidromeAPI, NavidromeAuthError, NavidromeError
 from .const import (
     FALLBACK_POLL_INTERVAL,
+    LIBRARY_MAX_AGE,
+    LIBRARY_REFRESH_COOLDOWN,
     SSE_INITIAL_RECONNECT_DELAY,
     SSE_KEEPALIVE_TIMEOUT,
     SSE_MAX_RECONNECT_DELAY,
@@ -37,6 +41,14 @@ class NavidromeCoordinator(DataUpdateCoordinator):
         self._sse_task: asyncio.Task | None = None
         self._sse_session: aiohttp.ClientSession | None = None
         self._library_data: dict = {}
+        self._library_refreshed_at = 0.0
+        self._library_debouncer = Debouncer(
+            hass,
+            _LOGGER,
+            cooldown=LIBRARY_REFRESH_COOLDOWN,
+            immediate=True,
+            function=self._library_changed,
+        )
 
     async def _async_update_data(self) -> dict:
         try:
@@ -46,7 +58,12 @@ class NavidromeCoordinator(DataUpdateCoordinator):
                 self.api.get_system_info(),
             )
 
-            if not self._library_data:
+            # This also runs on every SSE-triggered refresh, so gate on age:
+            # playlist edits emit no event and are picked up here.
+            if (
+                not self._library_data
+                or time.monotonic() - self._library_refreshed_at > LIBRARY_MAX_AGE
+            ):
                 await self._refresh_library()
 
             return {
@@ -71,12 +88,18 @@ class NavidromeCoordinator(DataUpdateCoordinator):
             "artists": artists,
             "playlists": playlists,
         }
+        self._library_refreshed_at = time.monotonic()
+
+    async def _library_changed(self):
+        await self._refresh_library()
+        await self.async_request_refresh()
 
     async def start_sse(self):
         if self._sse_task is None or self._sse_task.done():
             self._sse_task = asyncio.create_task(self._sse_loop())
 
     async def stop_sse(self):
+        self._library_debouncer.async_shutdown()
         if self._sse_task and not self._sse_task.done():
             self._sse_task.cancel()
             try:
@@ -192,13 +215,18 @@ class NavidromeCoordinator(DataUpdateCoordinator):
             await self.async_request_refresh()
         elif event_type == "scanStatus":
             if isinstance(data, dict) and not data.get("scanning", True):
-                await self._refresh_library()
-            await self.async_request_refresh()
+                await self._library_debouncer.async_call()
+            else:
+                await self.async_request_refresh()
         elif event_type == "refreshResource":
+            # Payload maps resource type to ids. Scrobbles and annotations send
+            # song/album/artist, which don't change library totals; only a
+            # scan ("*") or library change does.
+            if not isinstance(data, dict) or not ({"*", "library"} & data.keys()):
+                return
             scanning = (
                 self.data
                 and self.data.get("scan_status", {}).get("scanning", False)
             )
             if not scanning:
-                await self._refresh_library()
-                await self.async_request_refresh()
+                await self._library_debouncer.async_call()
