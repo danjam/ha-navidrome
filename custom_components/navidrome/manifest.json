@@ -10,5 +10,5 @@
     "issue_tracker": "https://github.com/danjam/ha-navidrome/issues",
     "loggers": ["custom_components.navidrome"],
     "requirements": [],
-    "version": "1.0.3"
+    "version": "1.0.4"
 }

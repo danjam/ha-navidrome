@@ -39,9 +39,10 @@ class NavidromeCoordinator(DataUpdateCoordinator):
         )
         self.api = api
         self._sse_task: asyncio.Task | None = None
-        self._sse_session: aiohttp.ClientSession | None = None
+        self._sse_connected = False
         self._library_data: dict = {}
         self._library_refreshed_at = 0.0
+        self._song_count: int | None = None
         self._library_debouncer = Debouncer(
             hass,
             _LOGGER,
@@ -66,10 +67,16 @@ class NavidromeCoordinator(DataUpdateCoordinator):
             ):
                 await self._refresh_library()
 
+            # When idle, count is the libraries' total songs; mid-scan it's
+            # scan progress, so keep the last idle value.
+            if not scan_status.get("scanning", False) and "count" in scan_status:
+                self._song_count = scan_status["count"]
+
             return {
                 "now_playing": now_playing,
                 "scan_status": scan_status,
                 "system": system,
+                "song_count": self._song_count,
                 **self._library_data,
             }
         except NavidromeAuthError as err:
@@ -100,8 +107,11 @@ class NavidromeCoordinator(DataUpdateCoordinator):
         await self.async_request_refresh()
 
     async def start_sse(self):
+        # A config-entry background task is cancelled on unload and on HA stop.
         if self._sse_task is None or self._sse_task.done():
-            self._sse_task = asyncio.create_task(self._sse_loop())
+            self._sse_task = self.config_entry.async_create_background_task(
+                self.hass, self._sse_loop(), "navidrome_sse"
+            )
 
     async def stop_sse(self):
         self._library_debouncer.async_shutdown()
@@ -111,18 +121,18 @@ class NavidromeCoordinator(DataUpdateCoordinator):
                 await self._sse_task
             except asyncio.CancelledError:
                 pass
-        if self._sse_session and not self._sse_session.closed:
-            await self._sse_session.close()
-            self._sse_session = None
 
     async def _sse_loop(self):
         delay = SSE_INITIAL_RECONNECT_DELAY
         first_failure = True
 
         while True:
+            # Set by _sse_listen once the stream is up (HTTP 200). Backoff and
+            # the "connection lost" warning reset only after a real connection,
+            # not after a re-login that may be followed by another 401.
+            self._sse_connected = False
             try:
                 await self._sse_listen()
-                delay = SSE_INITIAL_RECONNECT_DELAY
                 first_failure = True
             except asyncio.CancelledError:
                 raise
@@ -130,8 +140,6 @@ class NavidromeCoordinator(DataUpdateCoordinator):
                 try:
                     await self.api.authenticate()
                     _LOGGER.debug("SSE re-authenticated after token expiry")
-                    delay = SSE_INITIAL_RECONNECT_DELAY
-                    first_failure = True
                 except NavidromeAuthError:
                     _LOGGER.warning("SSE credentials invalid, starting reauth")
                     self.config_entry.async_start_reauth(self.hass)
@@ -139,11 +147,14 @@ class NavidromeCoordinator(DataUpdateCoordinator):
                 except NavidromeError as err:
                     _LOGGER.debug("SSE re-auth failed (server unavailable): %s", err)
             except Exception as err:
-                if first_failure:
+                if first_failure or self._sse_connected:
                     _LOGGER.warning("SSE connection lost: %s", err)
                     first_failure = False
                 else:
                     _LOGGER.debug("SSE reconnect failed: %s", err)
+
+            if self._sse_connected:
+                delay = SSE_INITIAL_RECONNECT_DELAY
 
             await asyncio.sleep(delay)
             delay = min(delay * 2, SSE_MAX_RECONNECT_DELAY)
@@ -151,42 +162,36 @@ class NavidromeCoordinator(DataUpdateCoordinator):
     async def _sse_listen(self):
         await self.api._ensure_auth()
 
-        if self._sse_session and not self._sse_session.closed:
-            await self._sse_session.close()
+        # HA's shared session (via the API client): HA closes it on stop, and
+        # cancelling the task releases the connection.
+        async with self.api._session.get(
+            f"{self.api.base_url}/api/events",
+            headers=self.api.sse_headers,
+            timeout=aiohttp.ClientTimeout(
+                total=None,
+                sock_connect=10,
+                sock_read=SSE_KEEPALIVE_TIMEOUT,
+            ),
+        ) as resp:
+            if resp.status in (401, 403):
+                self.api.invalidate_token()
+                raise NavidromeAuthError("SSE authentication failed")
 
-        self._sse_session = aiohttp.ClientSession()
+            if resp.status != 200:
+                raise NavidromeError(f"SSE connection failed with status {resp.status}")
 
-        try:
-            async with self._sse_session.get(
-                f"{self.api.base_url}/api/events",
-                headers=self.api.sse_headers,
-                timeout=aiohttp.ClientTimeout(
-                    total=None,
-                    sock_connect=10,
-                    sock_read=SSE_KEEPALIVE_TIMEOUT,
-                ),
-            ) as resp:
-                if resp.status in (401, 403):
-                    self.api.invalidate_token()
-                    raise NavidromeAuthError("SSE authentication failed")
+            self._sse_connected = True
 
-                if resp.status != 200:
-                    raise NavidromeError(f"SSE connection failed with status {resp.status}")
+            _LOGGER.debug("SSE connected to Navidrome")
 
-                _LOGGER.debug("SSE connected to Navidrome")
-
-                decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
-                buffer = ""
-                async for chunk in resp.content.iter_any():
-                    buffer += decoder.decode(chunk, final=False)
-                    buffer = buffer.replace("\r\n", "\n")
-                    while "\n\n" in buffer:
-                        event_block, buffer = buffer.split("\n\n", 1)
-                        await self._handle_sse_block(event_block)
-        finally:
-            if self._sse_session and not self._sse_session.closed:
-                await self._sse_session.close()
-                self._sse_session = None
+            decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
+            buffer = ""
+            async for chunk in resp.content.iter_any():
+                buffer += decoder.decode(chunk, final=False)
+                buffer = buffer.replace("\r\n", "\n")
+                while "\n\n" in buffer:
+                    event_block, buffer = buffer.split("\n\n", 1)
+                    await self._handle_sse_block(event_block)
 
     async def _handle_sse_block(self, block: str):
         event_type = None
