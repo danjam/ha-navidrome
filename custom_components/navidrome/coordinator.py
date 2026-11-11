@@ -91,7 +91,12 @@ class NavidromeCoordinator(DataUpdateCoordinator):
         self._library_refreshed_at = time.monotonic()
 
     async def _library_changed(self):
-        await self._refresh_library()
+        # Runs from the debouncer, which logs any exception as an ERROR with a
+        # traceback; a transient server error here isn't worth that.
+        try:
+            await self._refresh_library()
+        except NavidromeError as err:
+            _LOGGER.debug("Library refresh failed: %s", err)
         await self.async_request_refresh()
 
     async def start_sse(self):
@@ -211,13 +216,16 @@ class NavidromeCoordinator(DataUpdateCoordinator):
             _LOGGER.debug("Error processing SSE event %s", event_type, exc_info=True)
 
     async def _process_event(self, event_type: str, data):
-        if event_type == "nowPlayingCount":
+        if event_type in ("nowPlayingCount", "serverStart"):
+            # serverStart is sent on every new SSE subscription, so a
+            # reconnect after a Navidrome restart resyncs immediately.
             await self.async_request_refresh()
         elif event_type == "scanStatus":
+            # Refresh scan state now; the library refresh may be held by the
+            # debouncer's cooldown.
+            await self.async_request_refresh()
             if isinstance(data, dict) and not data.get("scanning", True):
                 await self._library_debouncer.async_call()
-            else:
-                await self.async_request_refresh()
         elif event_type == "refreshResource":
             # Payload maps resource type to ids. Scrobbles and annotations send
             # song/album/artist, which don't change library totals; only a
