@@ -3,7 +3,6 @@ import hashlib
 import logging
 import secrets
 import string
-from urllib.parse import urlencode
 
 import aiohttp
 
@@ -137,17 +136,33 @@ class NavidromeAPI:
         data = await self._subsonic_request("getPlaylists.view")
         return data.get("playlists", {}).get("playlist", [])
 
-    def get_cover_art_url(self, cover_id: str) -> str:
+    async def get_cover_art(self, cover_id: str) -> tuple[bytes | None, str | None]:
+        """Fetch cover art bytes. The request URL carries the Subsonic auth, so
+        the entity serves the image itself rather than handing HA that URL
+        (HA logs the full URL when a proxied image fetch fails)."""
         salt, token = self._subsonic_salt_token()
-        params = urlencode({
+        params = {
             "id": cover_id,
             "u": self.username,
             "t": token,
             "s": salt,
             "v": "1.16.1",
             "c": "ha-navidrome",
-        })
-        return f"{self.base_url}/rest/getCoverArt.view?{params}"
+        }
+        try:
+            async with self._session.get(
+                f"{self.base_url}/rest/getCoverArt.view",
+                params=params,
+                timeout=aiohttp.ClientTimeout(total=10),
+            ) as resp:
+                if resp.status != 200:
+                    _LOGGER.debug("Cover art fetch failed: HTTP %s", resp.status)
+                    return None, None
+                content_type = resp.headers.get("Content-Type", "").split(";")[0] or None
+                return await resp.read(), content_type
+        except (aiohttp.ClientError, TimeoutError) as err:
+            _LOGGER.debug("Cover art fetch failed: %s", type(err).__name__)
+            return None, None
 
     @property
     def sse_headers(self) -> dict:
